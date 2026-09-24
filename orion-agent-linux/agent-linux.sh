@@ -234,19 +234,13 @@ get_ip() {
 
 get_uptime_json() {
 
-    seconds=$(
-        cut -d. -f1 /proc/uptime
-    )
+    seconds=$(cut -d. -f1 /proc/uptime)
 
-    days=$((seconds/86400))
+    days=$((seconds / 86400))
 
-    hours=$(
-        (seconds%86400)/3600
-    )
+    hours=$(((seconds % 86400) / 3600))
 
-    minutes=$(
-        (seconds%3600)/60
-    )
+    minutes=$(((seconds % 3600) / 60))
 
     printf \
         '{"seconds":%d,"display":"%dd %dh %dm"}' \
@@ -255,7 +249,6 @@ get_uptime_json() {
         "$hours" \
         "$minutes"
 }
-
 # ============================================================
 # PROCESSES
 # ============================================================
