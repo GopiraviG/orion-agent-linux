@@ -273,7 +273,7 @@ try:
         text=True
     )
 
-    for row in output.splitlines()[1:\]:
+    for row in output.splitlines()[1:]:
 
         p = row.split(None, 3)
 
