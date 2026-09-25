@@ -613,6 +613,62 @@ get_patches_json() {
 }
 
 # ============================================================
+# HEARTBEAT
+# ============================================================
+
+send_heartbeat() {
+
+    if [ -z "$SERVER_URL" ] || [ -z "$TOKEN" ]; then
+        return 1
+    fi
+
+    HEARTBEAT_ENDPOINT=$(
+        echo "$SERVER_URL" |
+        sed 's#/api/v1/telemetry#/api/v1/heartbeat#'
+    )
+
+    HOSTNAME_VALUE=$(hostname)
+
+    PAYLOAD=$(python3 <<PY
+import json
+from datetime import datetime, timezone
+
+print(json.dumps({
+    "serverId": "$HOSTNAME_VALUE",
+    "serverName": "$HOSTNAME_VALUE",
+    "hostname": "$HOSTNAME_VALUE",
+    "timestamp": datetime.now(
+        timezone.utc
+    ).isoformat()
+}))
+PY
+)
+
+    curl \
+        -sS \
+        -m 5 \
+        -X POST \
+        -H "Content-Type: application/json" \
+        -H "X-Orion-SysPulse-Token: $TOKEN" \
+        --data "$PAYLOAD" \
+        "$HEARTBEAT_ENDPOINT" \
+        >/dev/null 2>&1
+
+    return $?
+}
+
+heartbeat_loop() {
+
+    while true; do
+
+        send_heartbeat
+
+        sleep 5
+
+    done
+}
+
+# ============================================================
 # COLLECT
 # ============================================================
 
@@ -883,15 +939,15 @@ send_report() {
 # MAIN
 # ============================================================
 
-log \
-    "Orion SysPulse Linux agent started"
-
 if [ "$1" = "--once" ]; then
 
     send_report
 
     exit $?
 fi
+
+# Start heartbeat in background
+heartbeat_loop &
 
 while true; do
 
