@@ -12,9 +12,12 @@ usage() {
     echo "Orion SysPulse Service Manager"
     echo ""
     echo "Usage:"
-    echo "  sudo ./orion.sh stop"
-    echo "  sudo ./orion.sh disable"
-    echo "  sudo ./orion.sh remove"
+    echo "  sudo orion start"
+	echo "  sudo orion stop"
+	echo "  sudo orion restart"
+	echo "  sudo orion disable"
+	echo "  sudo orion remove"
+	echo " sudo orion status"
     echo ""
 }
 
@@ -26,6 +29,69 @@ require_root() {
         echo "  sudo $0"
         echo ""
         exit 1
+    fi
+}
+
+status_service() {
+
+    echo ""
+
+    if [ -f "$SERVICE_FILE" ]; then
+
+        systemctl status \
+            "$SERVICE_NAME" \
+            --no-pager
+
+    else
+
+        echo "Service is not installed."
+
+    fi
+}
+
+start_service() {
+
+    echo ""
+    echo "Starting Orion SysPulse..."
+
+    if [ -f "$SERVICE_FILE" ]; then
+
+        systemctl daemon-reload
+
+        systemctl enable \
+            "$SERVICE_NAME" \
+            >/dev/null 2>&1 || true
+
+        systemctl start \
+            "$SERVICE_NAME"
+
+        echo "Service started."
+
+    else
+
+        echo "Service is not installed."
+
+    fi
+}
+
+restart_service() {
+
+    echo ""
+    echo "Restarting Orion SysPulse..."
+
+    if [ -f "$SERVICE_FILE" ]; then
+
+        systemctl daemon-reload
+
+        systemctl restart \
+            "$SERVICE_NAME"
+
+        echo "Service restarted."
+
+    else
+
+        echo "Service is not installed."
+
     fi
 }
 
@@ -109,8 +175,20 @@ require_root
 
 case "$1" in
 
+    start)
+        start_service
+        ;;
+
     stop)
         stop_service
+        ;;
+
+    restart)
+        restart_service
+        ;;
+
+    status)
+        status_service
         ;;
 
     disable)
