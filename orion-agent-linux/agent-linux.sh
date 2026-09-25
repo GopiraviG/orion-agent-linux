@@ -259,7 +259,7 @@ python3 <<'PY'
 import json
 import subprocess
 
-processes=[]
+processes = []
 
 try:
 
@@ -275,7 +275,7 @@ try:
 
     for row in output.splitlines()[1:\]:
 
-        p = row.split(None,3)
+        p = row.split(None, 3)
 
         if len(p) < 4:
             continue
@@ -302,18 +302,18 @@ try:
             "WorkingSetMB": mem_mb
         })
 
-except:
+except Exception:
     pass
 
 top_cpu = sorted(
     processes,
-    key=lambda x:x["CPU"],
+    key=lambda x: x["CPU"],
     reverse=True
 )[:20]
 
 top_mem = sorted(
     processes,
-    key=lambda x:x["WorkingSetMB"],
+    key=lambda x: x["WorkingSetMB"],
     reverse=True
 )[:20]
 
@@ -324,7 +324,6 @@ print(json.dumps({
 }))
 PY
 }
-
 # ============================================================
 # USERS INFO
 # ============================================================
@@ -584,21 +583,17 @@ get_patches_json() {
             }
 
             {
-
-                if(
-                    $1 ~ /^[a-zA-Z0-9]/
-                ) {
-
-                    if(n++)
-                        printf ","
-
-                    printf \
-                        "{\"id\":%s,\"description\":%s,\"installed\":\"UPDATE AVAILABLE\"}",
-
-                        json($1),
-                        json($2)
-                }
-            }
+				if ($1 ~ /^[a-zA-Z0-9]/) {
+			
+					if(n++)
+						printf ","
+			
+					printf \
+						"{\"id\":%s,\"description\":%s,\"installed\":\"UPDATE AVAILABLE\"}",
+						json($1),
+						json($2)
+				}
+			}
 
             END {
                 printf "]"
