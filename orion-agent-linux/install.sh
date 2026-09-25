@@ -77,12 +77,31 @@ fi
 cp "$SCRIPT_DIR/agent-linux.sh" \
    "$INSTALL_DIR/agent.sh"
 
+if [ -f "$SCRIPT_DIR/orion.sh" ]; then
+
+    cp "$SCRIPT_DIR/orion.sh" \
+       "$INSTALL_DIR/orion.sh"
+
+fi
 # fix windows line endings if present
 sed -i 's/\r$//' "$INSTALL_DIR/agent.sh"
 
 chmod 755 \
     "$INSTALL_DIR/agent.sh"
 
+if [ -f "$INSTALL_DIR/orion.sh" ]; then
+
+    chmod 755 \
+        "$INSTALL_DIR/orion.sh"
+
+    ln -sf \
+        "$INSTALL_DIR/orion.sh" \
+        /usr/local/bin/orion
+
+    chmod 755 \
+        /usr/local/bin/orion
+
+fi
 if [ -f "$SCRIPT_DIR/version.txt" ]; then
 
     cp "$SCRIPT_DIR/version.txt" \
