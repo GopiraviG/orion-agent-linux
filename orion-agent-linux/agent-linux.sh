@@ -419,26 +419,26 @@ try:
             "-o",
             "short-iso"
         ],
-        text=True
+        text=True,
+        errors="ignore"
     )
 
     for line in output.splitlines():
 
         logs.append({
-            "TimeCreated": "",
-            "Id": 0,
-            "LevelDisplayName": "Info",
-            "ProviderName": "journalctl",
-            "Message": line
+            "TimeCreated":"",
+            "Id":0,
+            "LevelDisplayName":"Info",
+            "ProviderName":"journalctl",
+            "Message":str(line)
         })
 
-except:
+except Exception:
     pass
 
-print(json.dumps(logs))
+print(json.dumps(logs, ensure_ascii=False))
 PY
 }
-
 # ============================================================
 # APPLICATIONS
 # ============================================================
@@ -660,10 +660,6 @@ collect() {
         get_ip
     )
 
-    PROCESSES=$(
-        get_processes_json
-    )
-
     APPLICATIONS=$(
         get_applications_json
     )
@@ -681,13 +677,56 @@ collect() {
 	SYSTEM=$(get_system_info)
 	LOGS=$(get_logs_json)
     
-	python3 - <<PY
+	
+    export HOSTNAME_VALUE
+    export OS_NAME
+    export OS_VERSION
+    export CPU_CORES
+    export CPU_USAGE
+    export MEMORY_JSON
+    export DISK_DATA
+    export UPTIME_JSON
+    export IP
+    export PROCESSES
+    export APPLICATIONS
+    export SERVICES
+    export PATCHES
+    export USERS
+    export SYSTEM
+    export LOGS
 
+    python3 <<'PY'
 import json
+import os
 from datetime import datetime, timezone
 
-data = {
 
+def json_env(name, default):
+    value = os.environ.get(name, "")
+    if not value:
+        return default
+
+    try:
+        return json.loads(value)
+    except Exception:
+        return default
+
+
+hostname = os.environ.get("HOSTNAME_VALUE", "")
+os_name = os.environ.get("OS_NAME", "")
+os_version = os.environ.get("OS_VERSION", "")
+
+try:
+    cpu_cores = int(os.environ.get("CPU_CORES", "1"))
+except Exception:
+    cpu_cores = 1
+
+try:
+    cpu_usage = float(os.environ.get("CPU_USAGE", "0"))
+except Exception:
+    cpu_usage = 0
+
+data = {
     "schemaVersion": "1.0",
 
     "agent": {
@@ -695,94 +734,91 @@ data = {
         "version": "1.0.0"
     },
 
-    "serverId":
-        ${HOSTNAME_VALUE@Q},
+    "serverId": hostname,
+    "serverName": hostname,
+    "hostname": hostname,
 
-    "serverName":
-        ${HOSTNAME_VALUE@Q},
+    "username": os.environ.get("USER", ""),
 
-    "hostname":
-        ${HOSTNAME_VALUE@Q},
-
-    "username":
-        ${USER@Q},
-
-    "timestamp":
-        datetime.now(
-            timezone.utc
-        ).isoformat(),
+    "timestamp": datetime.now(
+        timezone.utc
+    ).isoformat(),
 
     "os": {
-
-        "name":
-            ${OS_NAME@Q},
-
-        "version":
-            ${OS_VERSION@Q},
-
-        "build":
-            "",
-
-        "architecture":
-            $(uname -m |
-                python3 -c \
-                'import json,sys; print(json.dumps(sys.stdin.read().strip()))')
+        "name": os_name,
+        "version": os_version,
+        "build": "",
+        "architecture": os.uname().machine
     },
 
     "cpu": {
-
-        "cores":
-            $CPU_CORES,
-
-        "usagePercent":
-            $CPU_USAGE
+        "cores": cpu_cores,
+        "usagePercent": cpu_usage
     },
 
-    "memory":
-        json.loads('$MEMORY_JSON'),
+    "memory": json_env(
+        "MEMORY_JSON",
+        {}
+    ),
 
-    "disk":
-    json.loads('''$DISK_DATA''')["disk"],
+    "disk": json_env(
+        "DISK_DATA",
+        {}
+    ).get("disk", {}),
 
-"volumes":
-    json.loads('''$DISK_DATA''')["volumes"],
+    "volumes": json_env(
+        "DISK_DATA",
+        {}
+    ).get("volumes", []),
 
-"system":
-    json.loads('''$SYSTEM'''),
+    "system": json_env(
+        "SYSTEM",
+        {}
+    ),
 
-"users":
-    json.loads('''$USERS'''),
+    "users": json_env(
+        "USERS",
+        []
+    ),
 
-"logs":
-    json.loads('''$LOGS'''),
-	
+    "logs": json_env(
+        "LOGS",
+        []
+    ),
+
     "network": {
-
-        "ip":
-            ${IP@Q}
+        "ip": os.environ.get("IP", "")
     },
 
-    "uptime":
-        json.loads('$UPTIME_JSON'),
+    "uptime": json_env(
+        "UPTIME_JSON",
+        {}
+    ),
 
-    "patches":
-    json.loads('''$PATCHES'''),
+    "patches": json_env(
+        "PATCHES",
+        []
+    ),
 
-    "applications":
-    json.loads('''$APPLICATIONS'''),
+    "applications": json_env(
+        "APPLICATIONS",
+        []
+    ),
 
-    "processes":
-    json.loads('''$PROCESSES'''),
+    "processes": json_env(
+        "PROCESSES",
+        {}
+    ),
 
-    "services":
-    json.loads('''$SERVICES''')
+    "services": json_env(
+        "SERVICES",
+        []
+    )
 }
 
-print(
-    json.dumps(data)
-)
-
+print(json.dumps(data, ensure_ascii=False))
 PY
+
 }
 
 # ============================================================
