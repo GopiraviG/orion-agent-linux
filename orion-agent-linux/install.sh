@@ -83,16 +83,23 @@ if [ -f "$SCRIPT_DIR/orion.sh" ]; then
        "$INSTALL_DIR/orion.sh"
 
 fi
-# fix windows line endings if present
-sed -i 's/\r$//' "$INSTALL_DIR/agent.sh"
+# Fix Windows CRLF line endings on all shell scripts
 
-chmod 755 \
-    "$INSTALL_DIR/agent.sh"
+for f in "$INSTALL_DIR"/*.sh; do
+
+    if [ -f "$f" ]; then
+
+        sed -i 's/\r$//' "$f"
+
+        chmod 755 "$f"
+
+    fi
+
+done
+
+# Create global Orion command
 
 if [ -f "$INSTALL_DIR/orion.sh" ]; then
-
-    chmod 755 \
-        "$INSTALL_DIR/orion.sh"
 
     ln -sf \
         "$INSTALL_DIR/orion.sh" \
@@ -101,11 +108,8 @@ if [ -f "$INSTALL_DIR/orion.sh" ]; then
     chmod 755 \
         /usr/local/bin/orion
 
-fi
-if [ -f "$SCRIPT_DIR/version.txt" ]; then
+    echo "Installed global command: orion"
 
-    cp "$SCRIPT_DIR/version.txt" \
-       "$INSTALL_DIR/version.txt"
 fi
 
 echo "Agent installed."
