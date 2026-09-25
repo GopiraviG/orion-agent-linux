@@ -423,22 +423,32 @@ try:
         errors="ignore"
     )
 
+    idx = 1
+
     for line in output.splitlines():
 
+        timestamp = ""
+
+        if len(line) >= 25:
+            timestamp = line[:25]
+
         logs.append({
-            "TimeCreated":"",
-            "Id":0,
-            "LevelDisplayName":"Info",
-            "ProviderName":"journalctl",
-            "Message":str(line)
+            "TimeCreated": timestamp,
+            "Id": idx,
+            "LevelDisplayName": "Info",
+            "ProviderName": "journalctl",
+            "Message": line
         })
+
+        idx += 1
 
 except Exception:
     pass
 
-print(json.dumps(logs, ensure_ascii=False))
+print(json.dumps(logs))
 PY
 }
+
 # ============================================================
 # APPLICATIONS
 # ============================================================
