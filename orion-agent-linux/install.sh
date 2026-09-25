@@ -103,10 +103,10 @@ if [ -f "$INSTALL_DIR/orion.sh" ]; then
 
     ln -sf \
         "$INSTALL_DIR/orion.sh" \
-        /usr/local/bin/orion
+        /usr/bin/orion
 
     chmod 755 \
-        /usr/local/bin/orion
+        /usr/bin/orion
 
     echo "Installed global command: orion"
 

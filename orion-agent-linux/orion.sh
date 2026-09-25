@@ -84,7 +84,7 @@ remove_agent() {
 
     echo "Removing installation files..."
 
-	rm -f /usr/local/bin/orion
+	rm -f /usr/bin/orion
 	
 	rm -rf "$INSTALL_DIR"
 
