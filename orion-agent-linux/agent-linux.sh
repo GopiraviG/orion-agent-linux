@@ -801,7 +801,8 @@ collect() {
 		get_installed_patches_json
 	)
 	
-	PATCHES=$(python3 <<PY
+	PATCHES=$(
+	python3 <<PY
 	import json
 	
 	pending = json.loads('''$PENDING_PATCHES''')
@@ -957,7 +958,8 @@ data = {
 
 print(json.dumps(data, ensure_ascii=False))
 PY
-
+}
+``
 # ============================================================
 # SEND
 # ============================================================
