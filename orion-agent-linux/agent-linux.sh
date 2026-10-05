@@ -793,24 +793,23 @@ collect() {
         get_services_json
     )
 
-    PENDING_PATCHES=$(
-		get_patches_json
-	)
+    PENDING_PATCHES=$(get_patches_json)
+
+	INSTALLED_PATCHES=$(get_installed_patches_json)
 	
-	INSTALLED_PATCHES=$(
-		get_installed_patches_json
-	)
+	PATCHES=$(printf '%s\n%s' \
+		"$INSTALLED_PATCHES" \
+		"$PENDING_PATCHES" |
+	python3 -c '
+	import json,sys
 	
-	PATCHES=$(
-	python3 <<PY
-	import json
+	lines=[l.strip() for l in sys.stdin if l.strip()]
 	
-	pending = json.loads('''$PENDING_PATCHES''')
-	installed = json.loads('''$INSTALLED_PATCHES''')
+	installed=json.loads(lines[0]) if len(lines)>0 else []
+	pending=json.loads(lines[1]) if len(lines)>1 else []
 	
 	print(json.dumps(installed + pending))
-	PY
-	)
+	')
 
 	PROCESSES=$(get_processes_json)
 	USERS=$(get_users_json)
