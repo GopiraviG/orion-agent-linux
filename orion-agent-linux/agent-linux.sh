@@ -405,6 +405,7 @@ get_logs_json() {
 python3 <<'PY'
 import json
 import subprocess
+import re
 
 logs=[]
 
@@ -414,7 +415,7 @@ try:
         [
             "journalctl",
             "-n",
-            "50",
+            "100",
             "--no-pager",
             "-o",
             "short-iso"
@@ -427,16 +428,31 @@ try:
 
     for line in output.splitlines():
 
-        timestamp = ""
+        timestamp = line[:25] if len(line) >= 25 else ""
 
-        if len(line) >= 25:
-            timestamp = line[:25]
+        provider = "journalctl"
+
+        m = re.search(r' ([a-zA-Z0-9_.-]+)\[\d+\\]:', line)
+
+        if m:
+            provider = m.group(1)
+
+        level = "Info"
+
+        lower = line.lower()
+
+        if "error" in lower:
+            level = "Error"
+        elif "warning" in lower:
+            level = "Warning"
+        elif "critical" in lower:
+            level = "Critical"
 
         logs.append({
             "TimeCreated": timestamp,
             "Id": idx,
-            "LevelDisplayName": "Info",
-            "ProviderName": "journalctl",
+            "LevelDisplayName": level,
+            "ProviderName": provider,
             "Message": line
         })
 
@@ -541,85 +557,128 @@ get_services_json() {
 }
 
 # ============================================================
+# INSTALLED PATCHES
+# ============================================================
+
+get_installed_patches_json() {
+
+python3 <<'PY'
+import json
+import shutil
+import subprocess
+
+patches = []
+
+try:
+
+    if shutil.which("rpm"):
+
+        output = subprocess.check_output(
+            ["rpm", "-qa", "--last"],
+            text=True,
+            errors="ignore"
+        )
+
+        for line in output.splitlines()[:30\]:
+
+            pkg = line.split()[0]
+
+            patches.append({
+                "id": pkg,
+                "description": "Installed Package",
+                "installed": "SUCCESS",
+                "status": "SUCCESS"
+            })
+
+except Exception:
+    pass
+
+print(json.dumps(patches))
+PY
+}
+
+# ============================================================
 # UPDATES
 # ============================================================
 
 get_patches_json() {
 
-    if command -v apt >/dev/null 2>&1; then
+python3 <<'PY'
+import json
+import shutil
+import subprocess
 
-        apt list --upgradable \
-            2>/dev/null |
-            tail -n +2 |
-            head -50 |
-            awk '
+patches = []
 
-            BEGIN {
-                printf "["
-            }
+try:
 
-            {
+    #
+    # Debian / Ubuntu
+    #
+    if shutil.which("apt"):
 
-                if(n++)
-                    printf ","
+        output = subprocess.check_output(
+            ["apt", "list", "--upgradable"],
+            stderr=subprocess.DEVNULL,
+            text=True
+        )
 
-                printf \
-                    "{\"id\":%s,\"description\":%s,\"installed\":\"UPDATE AVAILABLE\"}",
+        for line in output.splitlines()[1:51\]:
 
-                    json($1),
-                    json($2)
-            }
+            if not line.strip():
+                continue
 
-            END {
-                printf "]"
-            }
+            parts = line.split()
 
-            function json(s) {
+            pkg = parts[0]
+            version = parts[1] if len(parts) > 1 else ""
 
-                gsub(/"/,"\\\"",s)
+            patches.append({
+                "id": pkg,
+                "description": version,
+                "installed": "-",
+                "status": "PENDING"
+            })
 
-                return "\"" s "\""
-            }'
+    #
+    # RHEL / Rocky / Alma / Oracle / Fedora
+    #
+    elif shutil.which("dnf"):
 
-    elif command -v dnf >/dev/null 2>&1; then
+        output = subprocess.check_output(
+            ["dnf", "check-update"],
+            stderr=subprocess.DEVNULL,
+            text=True
+        )
 
-        dnf check-update \
-            2>/dev/null |
-            head -50 |
-            awk '
+        for line in output.splitlines():
 
-            BEGIN {
-                printf "["
-            }
+            line = line.strip()
 
-            {
-				if ($1 ~ /^[a-zA-Z0-9]/) {
-			
-					if(n++)
-						printf ","
-			
-					printf \
-						"{\"id\":%s,\"description\":%s,\"installed\":\"UPDATE AVAILABLE\"}",
-						json($1),
-						json($2)
-				}
-			}
+            if not line:
+                continue
 
-            END {
-                printf "]"
-            }
+            parts = line.split()
 
-            function json(s) {
+            if len(parts) < 2:
+                continue
 
-                gsub(/"/,"\\\"",s)
+            if "." not in parts[0]:
 
-                return "\"" s "\""
-            }'
+                continue
 
-    else
+            patches.append({
+                "id": parts[0],
+                "description": parts[1],
+                "installed": "-",
+                "status": "PENDING"
+            })
 
-        echo "[]"
-    fi
+except Exception:
+    pass
+
+print(json.dumps(patches[:50]))
+PY
 }
 
 # ============================================================
@@ -734,10 +793,24 @@ collect() {
         get_services_json
     )
 
-    PATCHES=$(
-        get_patches_json
-    )
+    PENDING_PATCHES=$(
+		get_patches_json
+	)
 	
+	INSTALLED_PATCHES=$(
+		get_installed_patches_json
+	)
+	
+	PATCHES=$(python3 <<PY
+	import json
+	
+	pending = json.loads('''$PENDING_PATCHES''')
+	installed = json.loads('''$INSTALLED_PATCHES''')
+	
+	print(json.dumps(installed + pending))
+	PY
+	)
+
 	PROCESSES=$(get_processes_json)
 	USERS=$(get_users_json)
 	SYSTEM=$(get_system_info)
