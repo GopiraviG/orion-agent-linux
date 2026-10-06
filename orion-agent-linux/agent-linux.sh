@@ -557,47 +557,6 @@ get_services_json() {
 }
 
 # ============================================================
-# INSTALLED PATCHES
-# ============================================================
-
-get_installed_patches_json() {
-
-python3 <<'PY'
-import json
-import shutil
-import subprocess
-
-patches = []
-
-try:
-
-    if shutil.which("rpm"):
-
-        output = subprocess.check_output(
-            ["rpm", "-qa", "--last"],
-            text=True,
-            errors="ignore"
-        )
-
-        for line in output.splitlines()[:30\]:
-
-            pkg = line.split()[0]
-
-            patches.append({
-                "id": pkg,
-                "description": "Installed Package",
-                "installed": "SUCCESS",
-                "status": "SUCCESS"
-            })
-
-except Exception:
-    pass
-
-print(json.dumps(patches))
-PY
-}
-
-# ============================================================
 # UPDATES
 # ============================================================
 
@@ -607,77 +566,109 @@ python3 <<'PY'
 import json
 import shutil
 import subprocess
+import sys
 
-patches = []
+patches=[]
 
 try:
 
-    #
-    # Debian / Ubuntu
-    #
     if shutil.which("apt"):
 
         output = subprocess.check_output(
-            ["apt", "list", "--upgradable"],
+            ["apt","list","--upgradable"],
             stderr=subprocess.DEVNULL,
             text=True
         )
 
-        for line in output.splitlines()[1:51\]:
+        for line in output.splitlines()[1:51]:
 
             if not line.strip():
                 continue
 
-            parts = line.split()
-
-            pkg = parts[0]
-            version = parts[1] if len(parts) > 1 else ""
+            parts=line.split()
 
             patches.append({
-                "id": pkg,
-                "description": version,
-                "installed": "-",
-                "status": "PENDING"
+                "id":parts[0],
+                "description":parts[1] if len(parts)>1 else "",
+                "installed":"-",
+                "status":"PENDING"
             })
 
-    #
-    # RHEL / Rocky / Alma / Oracle / Fedora
-    #
     elif shutil.which("dnf"):
 
-        output = subprocess.check_output(
-            ["dnf", "check-update"],
-            stderr=subprocess.DEVNULL,
-            text=True
-        )
+    output = subprocess.check_output(
+        ["dnf","check-update"],
+        stderr=subprocess.DEVNULL,
+        text=True
+    )
 
-        for line in output.splitlines():
+    for line in output.splitlines():
 
-            line = line.strip()
+        line = line.strip()
 
-            if not line:
-                continue
+        if not line:
+            continue
 
-            parts = line.split()
+        parts = line.split()
 
-            if len(parts) < 2:
-                continue
+        if len(parts) < 2:
+            continue
 
-            if "." not in parts[0]:
+        patches.append({
+            "id": parts[0],
+            "description": parts[1],
+            "installed": "-",
+            "status": "PENDING"
+        })
 
+elif shutil.which("yum"):
+
+    output = subprocess.check_output(
+        ["yum","check-update"],
+        stderr=subprocess.DEVNULL,
+        text=True
+    )
+
+    for line in output.splitlines():
+
+        line = line.strip()
+
+        if not line:
+            continue
+
+        parts = line.split()
+
+        if len(parts) < 2:
+            continue
+
+        patches.append({
+            "id": parts[0],
+            "description": parts[1],
+            "installed": "-",
+            "status": "PENDING"
+        })
+
+            parts=line.split()
+
+            if len(parts)<2:
                 continue
 
             patches.append({
-                "id": parts[0],
-                "description": parts[1],
-                "installed": "-",
-                "status": "PENDING"
+                "id":parts[0],
+                "description":parts[1],
+                "installed":"-",
+                "status":"PENDING"
             })
 
-except Exception:
-    pass
+except Exception as e:
 
-print(json.dumps(patches[:50]))
+    print(
+        "PATCH ERROR:",
+        str(e),
+        file=sys.stderr
+    )
+
+print(json.dumps(patches))
 PY
 }
 
@@ -793,23 +784,7 @@ collect() {
         get_services_json
     )
 
-    PENDING_PATCHES=$(get_patches_json)
-
-	INSTALLED_PATCHES=$(get_installed_patches_json)
-	
-	PATCHES=$(printf '%s\n%s' \
-		"$INSTALLED_PATCHES" \
-		"$PENDING_PATCHES" |
-	python3 -c '
-	import json,sys
-	
-	lines=[l.strip() for l in sys.stdin if l.strip()]
-	
-	installed=json.loads(lines[0]) if len(lines)>0 else []
-	pending=json.loads(lines[1]) if len(lines)>1 else []
-	
-	print(json.dumps(installed + pending))
-	')
+    PATCHES=$(get_patches_json)
 
 	PROCESSES=$(get_processes_json)
 	USERS=$(get_users_json)
