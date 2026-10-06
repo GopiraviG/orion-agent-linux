@@ -568,96 +568,89 @@ import shutil
 import subprocess
 import sys
 
-patches=[]
+patches = []
 
 try:
 
     if shutil.which("apt"):
 
         output = subprocess.check_output(
-            ["apt","list","--upgradable"],
+            ["apt", "list", "--upgradable"],
             stderr=subprocess.DEVNULL,
             text=True
         )
 
-        for line in output.splitlines()[1:51]:
+        for line in output.splitlines()[1:\]:
 
-            if not line.strip():
+            line = line.strip()
+
+            if not line:
                 continue
 
-            parts=line.split()
+            parts = line.split()
 
             patches.append({
-                "id":parts[0],
-                "description":parts[1] if len(parts)>1 else "",
-                "installed":"-",
-                "status":"PENDING"
+                "id": parts[0],
+                "description": parts[1] if len(parts) > 1 else "",
+                "installed": "-",
+                "status": "PENDING"
             })
 
     elif shutil.which("dnf"):
 
-    output = subprocess.check_output(
-        ["dnf","check-update"],
-        stderr=subprocess.DEVNULL,
-        text=True
-    )
+        output = subprocess.check_output(
+            ["dnf", "check-update"],
+            stderr=subprocess.DEVNULL,
+            text=True
+        )
 
-    for line in output.splitlines():
+        for line in output.splitlines():
 
-        line = line.strip()
+            line = line.strip()
 
-        if not line:
-            continue
+            if not line:
+                continue
 
-        parts = line.split()
+            parts = line.split()
 
-        if len(parts) < 2:
-            continue
+            if len(parts) < 2:
+                continue
 
-        patches.append({
-            "id": parts[0],
-            "description": parts[1],
-            "installed": "-",
-            "status": "PENDING"
-        })
-
-elif shutil.which("yum"):
-
-    output = subprocess.check_output(
-        ["yum","check-update"],
-        stderr=subprocess.DEVNULL,
-        text=True
-    )
-
-    for line in output.splitlines():
-
-        line = line.strip()
-
-        if not line:
-            continue
-
-        parts = line.split()
-
-        if len(parts) < 2:
-            continue
-
-        patches.append({
-            "id": parts[0],
-            "description": parts[1],
-            "installed": "-",
-            "status": "PENDING"
-        })
-
-            parts=line.split()
-
-            if len(parts)<2:
+            if "." not in parts[0\]:
                 continue
 
             patches.append({
-                "id":parts[0],
-                "description":parts[1],
-                "installed":"-",
-                "status":"PENDING"
+                "id": parts[0],
+                "description": parts[1],
+                "installed": "-",
+                "status": "PENDING"
+            })
+
+    elif shutil.which("yum"):
+
+        output = subprocess.check_output(
+            ["yum", "check-update"],
+            stderr=subprocess.DEVNULL,
+            text=True
+        )
+
+        for line in output.splitlines():
+
+            line = line.strip()
+
+            if not line:
+                continue
+
+            parts = line.split()
+
+            if len(parts) < 2:
+                continue
+
+            patches.append({
+                "id": parts[0],
+                "description": parts[1],
+                "installed": "-",
+                "status": "PENDING"
             })
 
 except Exception as e:
@@ -668,10 +661,10 @@ except Exception as e:
         file=sys.stderr
     )
 
-print(json.dumps(patches))
+print(json.dumps(patches[:50]))
 PY
-}
 
+}
 # ============================================================
 # HEARTBEAT
 # ============================================================
