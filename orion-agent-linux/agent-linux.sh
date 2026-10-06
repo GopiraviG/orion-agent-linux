@@ -23,7 +23,7 @@ set -u
 set -o pipefail
 
 readonly AGENT_NAME="Orion SysPulse Agent"
-readonly AGENT_VERSION="2.0.0"
+readonly AGENT_VERSION="2.1.0"
 readonly SCHEMA_VERSION="1.1"
 readonly DEFAULT_HOME="/opt/orion/syspulse"
 readonly DEFAULT_INTERVAL=60
@@ -36,7 +36,9 @@ readonly DEFAULT_TOP_PROCESSES=20
 readonly DEFAULT_MAX_LOGS=100
 readonly DEFAULT_MAX_PATCHES=500
 readonly DEFAULT_PACKAGE_SCAN_INTERVAL=900
-readonly PACKAGE_CACHE_FILE_NAME="package-cache.json"
+readonly DEFAULT_PATCH_HISTORY_DAYS=90
+readonly DEFAULT_PATCH_SCOPE="os"
+readonly PACKAGE_CACHE_FILE_NAME="patch-cache.json"
 
 HOME_DIR="${SYSPULSE_HOME:-$DEFAULT_HOME}"
 CONFIG="$HOME_DIR/config.json"
@@ -56,6 +58,8 @@ TOP_PROCESSES="$DEFAULT_TOP_PROCESSES"
 MAX_LOGS="$DEFAULT_MAX_LOGS"
 MAX_PATCHES="$DEFAULT_MAX_PATCHES"
 PACKAGE_SCAN_INTERVAL="$DEFAULT_PACKAGE_SCAN_INTERVAL"
+PATCH_HISTORY_DAYS="$DEFAULT_PATCH_HISTORY_DAYS"
+PATCH_SCOPE="$DEFAULT_PATCH_SCOPE"
 CA_BUNDLE=""
 INSECURE_TLS="false"
 LOG_LEVEL="INFO"
@@ -178,6 +182,8 @@ read_config() {
             max_logs) MAX_LOGS="$value" ;;
             max_patches) MAX_PATCHES="$value" ;;
             package_scan_interval) PACKAGE_SCAN_INTERVAL="$value" ;;
+            patch_history_days) PATCH_HISTORY_DAYS="$value" ;;
+            patch_scope) PATCH_SCOPE="$value" ;;
             ca_bundle) CA_BUNDLE="$value" ;;
             insecure_tls) INSECURE_TLS="$value" ;;
             log_level) LOG_LEVEL="$value" ;;
@@ -227,6 +233,8 @@ emit("top_processes", "agent.topProcesses", 20)
 emit("max_logs", "agent.maxLogs", 100)
 emit("max_patches", "agent.maxPatches", 500)
 emit("package_scan_interval", "agent.packageScanIntervalSeconds", 900)
+emit("patch_history_days", "agent.patchHistoryDays", 90)
+emit("patch_scope", "agent.patchScope", "os")
 emit("ca_bundle", "collector.caBundle", "")
 emit("insecure_tls", "collector.insecureSkipVerify", False)
 emit("log_level", "agent.logLevel", "INFO")
@@ -243,6 +251,7 @@ PY
     is_uint "$MAX_LOGS" || MAX_LOGS="$DEFAULT_MAX_LOGS"
     is_uint "$MAX_PATCHES" || MAX_PATCHES="$DEFAULT_MAX_PATCHES"
     is_uint "$PACKAGE_SCAN_INTERVAL" || PACKAGE_SCAN_INTERVAL="$DEFAULT_PACKAGE_SCAN_INTERVAL"
+    is_uint "$PATCH_HISTORY_DAYS" || PATCH_HISTORY_DAYS="$DEFAULT_PATCH_HISTORY_DAYS"
 
     # Protect the machine from pathological configuration values.
     [ "$INTERVAL" -lt 5 ] && INTERVAL=5
@@ -258,6 +267,13 @@ PY
     [ "$MAX_PATCHES" -lt 1 ] && MAX_PATCHES=1
     [ "$MAX_PATCHES" -gt 5000 ] && MAX_PATCHES=5000
     [ "$PACKAGE_SCAN_INTERVAL" -lt 60 ] && PACKAGE_SCAN_INTERVAL=60
+    [ "$PATCH_HISTORY_DAYS" -lt 1 ] && PATCH_HISTORY_DAYS=1
+    [ "$PATCH_HISTORY_DAYS" -gt 3650 ] && PATCH_HISTORY_DAYS=3650
+
+    case "$(printf '%s' "$PATCH_SCOPE" | tr '[:upper:]' '[:lower:]')" in
+        os|all) PATCH_SCOPE="$(printf '%s' "$PATCH_SCOPE" | tr '[:upper:]' '[:lower:]')" ;;
+        *) PATCH_SCOPE="$DEFAULT_PATCH_SCOPE" ;;
+    esac
 
     case "$(printf '%s' "$LOG_LEVEL" | tr '[:lower:]' '[:upper:]')" in
         ERROR|WARN|INFO) LOG_LEVEL="$(printf '%s' "$LOG_LEVEL" | tr '[:lower:]' '[:upper:]')" ;;
@@ -317,7 +333,7 @@ collect_payload() {
     # safer than starting Python once for every metric. Package inventory is
     # cached between telemetry cycles to avoid repeatedly invoking package
     # managers on production hosts.
-    python3 - "$MAX_PROCESSES" "$TOP_PROCESSES" "$MAX_LOGS" "$MAX_PATCHES" "$PACKAGE_SCAN_INTERVAL" "$HOME_DIR/$PACKAGE_CACHE_FILE_NAME" <<'PY'
+    python3 - "$MAX_PROCESSES" "$TOP_PROCESSES" "$MAX_LOGS" "$MAX_PATCHES" "$PACKAGE_SCAN_INTERVAL" "$PATCH_HISTORY_DAYS" "$PATCH_SCOPE" "$HOME_DIR/$PACKAGE_CACHE_FILE_NAME" <<'PY'
 import gzip
 import json
 import os
@@ -337,7 +353,9 @@ TOP_PROCESSES = max(1, int(sys.argv[2]))
 MAX_LOGS = max(1, int(sys.argv[3]))
 MAX_PATCHES = max(1, int(sys.argv[4]))
 PACKAGE_SCAN_INTERVAL = max(60, int(sys.argv[5]))
-PACKAGE_CACHE_FILE = sys.argv[6]
+PATCH_HISTORY_DAYS = max(1, int(sys.argv[6]))
+PATCH_SCOPE = sys.argv[7].strip().lower() if len(sys.argv) > 7 else "os"
+PACKAGE_CACHE_FILE = sys.argv[8] if len(sys.argv) > 8 else sys.argv[6]
 
 now = time.time()
 
@@ -775,86 +793,475 @@ def alpine_packages(limit):
     return patches
 
 
+# -----------------------------------------------------------------------------
+# Patch/update scope
+# -----------------------------------------------------------------------------
+# The original implementation treated every installed package as a "SUCCESS"
+# patch and every package-manager upgrade as a "PENDING" patch. That makes a
+# Linux host look as if applications, libraries, and all package inventory are
+# OS patches. In OS mode we instead report:
+#   * PENDING: packages that can be updated from the distribution/vendor repos
+#   * SUCCESS: recent package upgrade transactions from the native package
+#              manager history, filtered to distribution/vendor packages
+#
+# PATCH_SCOPE="all" remains available for compatibility/troubleshooting and
+# returns the legacy package-inventory behavior.
+
+OSR = parse_os_release()
+OS_ID = OSR.get("ID", "").strip().lower()
+OS_LIKE = OSR.get("ID_LIKE", "").strip().lower()
+
+
+def history_cutoff():
+    return now - (PATCH_HISTORY_DAYS * 86400)
+
+
+def parse_history_timestamp(value):
+    value = (value or "").strip().replace("T", " ")
+    value = re.sub(r"\s+", " ", value)
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value[:19], fmt).replace(tzinfo=timezone.utc).timestamp()
+        except Exception:
+            pass
+    return 0
+
+
+def within_history(value):
+    ts = parse_history_timestamp(value)
+    return ts <= now and ts >= history_cutoff()
+
+
+def patch_obj(pkg_id, description, status, installed_on="-", source=""):
+    item = {
+        "id": pkg_id,
+        "description": description,
+        "installedOn": installed_on or "-",
+        "status": status,
+        "category": "OS",
+    }
+    if source:
+        item["source"] = source
+    return item
+
+
+# ----- APT / Debian-family ---------------------------------------------------
+
+APT_SOURCE_CACHE = {}
+
+
+def is_official_apt_source(source, os_id):
+    source = (source or "").strip()
+    m = re.search(r"https?://([^/\s]+)", source, re.I)
+    if not m:
+        return False
+    host = m.group(1).split(":", 1)[0].lower().rstrip(".")
+
+    if os_id in {"debian"} or "debian" in OS_LIKE:
+        return host == "debian.org" or host.endswith(".debian.org")
+    if os_id in {"ubuntu", "pop", "elementary"} or os_id in {"linuxmint", "mint"} or "ubuntu" in OS_LIKE:
+        return host == "ubuntu.com" or host.endswith(".ubuntu.com") or host.endswith(".linuxmint.com")
+    if os_id == "kali":
+        return host == "kali.org" or host.endswith(".kali.org") or host.endswith(".kali.download")
+    return host == "debian.org" or host.endswith(".debian.org")
+
+
+def apt_source_is_os(pkg):
+    pkg = pkg.split("/", 1)[0]
+    if pkg in APT_SOURCE_CACHE:
+        return APT_SOURCE_CACHE[pkg]
+    if not shutil.which("apt-cache"):
+        APT_SOURCE_CACHE[pkg] = (False, "")
+        return APT_SOURCE_CACHE[pkg]
+
+    rc, out = run(["apt-cache", "show", pkg], timeout=10)
+    if rc != 0:
+        APT_SOURCE_CACHE[pkg] = (False, "")
+        return APT_SOURCE_CACHE[pkg]
+
+    first_source = ""
+    for line in out.splitlines():
+        if line.startswith("APT-Sources:"):
+            source = line.split(":", 1)[1].strip()
+            if not first_source:
+                first_source = source
+            if is_official_apt_source(source, OS_ID):
+                APT_SOURCE_CACHE[pkg] = (True, source)
+                return APT_SOURCE_CACHE[pkg]
+
+    APT_SOURCE_CACHE[pkg] = (False, first_source)
+    return APT_SOURCE_CACHE[pkg]
+
+
+def installed_updates_deb(limit):
+    result = []
+    files = [
+        "/var/log/apt/history.log",
+        "/var/log/apt/history.log.1",
+        "/var/log/apt/history.log.2.gz",
+        "/var/log/apt/history.log.3.gz",
+        "/var/log/apt/history.log.4.gz",
+        "/var/log/apt/history.log.5.gz",
+    ]
+    seen = set()
+    for path in files:
+        if len(result) >= limit or not os.path.exists(path):
+            continue
+        try:
+            opener = gzip.open if path.endswith(".gz") else open
+            current_date = ""
+            with opener(path, "rt", encoding="utf-8", errors="replace") as f:
+                for raw in f:
+                    line = raw.rstrip("\n")
+                    if line.startswith("Start-Date:"):
+                        current_date = line.split(":", 1)[1].strip()
+                        continue
+                    if not line.startswith("Upgrade:") or not within_history(current_date):
+                        continue
+
+                    for match in re.finditer(r"([A-Za-z0-9][A-Za-z0-9+._:-]*)(?::[A-Za-z0-9._-]+)?\s*\(([^,]+),\s*([^)]+)\)", line):
+                        pkg = match.group(1)
+                        old_version = match.group(2).strip()
+                        new_version = match.group(3).strip()
+                        official, source = apt_source_is_os(pkg)
+                        if not official:
+                            continue
+                        key = (pkg, new_version, current_date)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        result.append(
+                            patch_obj(
+                                pkg,
+                                f"{pkg} update ({new_version})",
+                                "SUCCESS",
+                                current_date,
+                                source,
+                            )
+                        )
+                        if len(result) >= limit:
+                            break
+                    if len(result) >= limit:
+                        break
+        except Exception:
+            continue
+    return result
+
+
+# ----- RPM / RHEL-family ----------------------------------------------------
+
+RPM_REPO_CACHE = {}
+RPM_VENDOR_CACHE = {}
+
+
+def is_official_rpm_repo(repo, os_id):
+    repo = (repo or "").strip().lower()
+    if not repo:
+        return False
+
+    if os_id == "fedora":
+        return repo.startswith(("fedora", "updates", "fedora-modular", "updates-modular", "fedora-cisco-openh264"))
+
+    if os_id in {"rhel", "centos", "rocky", "almalinux", "ol", "oracle"} or any(x in OS_LIKE for x in ("rhel", "fedora")):
+        good = (
+            "baseos", "appstream", "crb", "codeready", "extras",
+            "powertools", "supplementary", "rhel-", "rocky-",
+            "almalinux-", "ol", "ol-", "centos-", "centos",
+        )
+        # Explicitly reject common third-party repositories.
+        bad = ("epel", "remi", "rpmfusion", "docker", "hashicorp", "google", "microsoft", "copr")
+        return repo.startswith(good) and not repo.startswith(bad)
+
+    return False
+
+
+def rpm_vendor_for(spec):
+    if spec in RPM_VENDOR_CACHE:
+        return RPM_VENDOR_CACHE[spec]
+    if not shutil.which("rpm"):
+        RPM_VENDOR_CACHE[spec] = ""
+        return ""
+    rc, out = run(["rpm", "-q", "--qf", "%{VENDOR}", spec], timeout=5)
+    vendor = out.strip() if rc == 0 else ""
+    RPM_VENDOR_CACHE[spec] = vendor
+    return vendor
+
+
+def is_official_rpm_vendor(vendor, os_id):
+    v = (vendor or "").lower()
+    if not v:
+        return False
+    if os_id == "fedora" or "fedora" in OS_LIKE:
+        return "fedora" in v or "red hat" in v
+    if os_id in {"rhel", "centos", "rocky", "almalinux", "ol", "oracle"} or "rhel" in OS_LIKE:
+        return any(x in v for x in (
+            "red hat", "centos", "rocky enterprise", "almalinux",
+            "oracle", "oracle linux",
+        ))
+    return False
+
+
+def installed_updates_rpm(limit):
+    result = []
+    seen = set()
+    for path in ("/var/log/dnf.rpm.log", "/var/log/yum.log", "/var/log/dnf.log"):
+        if len(result) >= limit or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "rt", encoding="utf-8", errors="replace") as f:
+                for raw in reversed(f.readlines()):
+                    line = raw.rstrip("\n")
+                    ts_match = re.search(r"(20\d\d-\d\d-\d\d[ T]\d\d:\d\d:\d\d)", line)
+                    if not ts_match:
+                        continue
+                    ts = ts_match.group(1)
+                    if not within_history(ts):
+                        continue
+                    match = re.search(r"\b(?:Updated|Upgraded):\s+(\S+)", line, re.I)
+                    if not match:
+                        continue
+                    spec = match.group(1).strip()
+                    if spec in seen:
+                        continue
+                    vendor = rpm_vendor_for(spec)
+                    if not is_official_rpm_vendor(vendor, OS_ID):
+                        continue
+                    seen.add(spec)
+                    result.append(patch_obj(spec, f"{spec} update", "SUCCESS", ts))
+                    if len(result) >= limit:
+                        break
+        except Exception:
+            continue
+    return result
+
+
+# ----- SUSE ------------------------------------------------------------------
+
+def is_official_suse_repo(repo):
+    r = (repo or "").strip().lower()
+    if not r:
+        return False
+    bad = ("packman", "home:", "obs://", "non-oss-thirdparty", "thirdparty", "google", "microsoft", "docker")
+    if r.startswith(bad):
+        return False
+    good = (
+        "repo-oss", "repo-update", "repo-non-oss", "repo-sle",
+        "openSUSE", "opensuse", "sles", "sle-", "main", "update",
+        "suse", "download.opensuse.org",
+    )
+    return r.startswith(tuple(x.lower() for x in good))
+
+
+def installed_updates_suse(limit):
+    result = []
+    path = "/var/log/zypp/history"
+    if not os.path.isfile(path):
+        return result
+    try:
+        with open(path, "rt", encoding="utf-8", errors="replace") as f:
+            for line in reversed(f.readlines()):
+                if len(result) >= limit:
+                    break
+                p = line.rstrip("\n").split("|")
+                if len(p) < 8 or p[1].strip() not in {"install", "upgrade"}:
+                    continue
+                ts, action, name, version, arch, _who, repo = [x.strip() for x in p[:7]]
+                if action != "upgrade" or not within_history(ts) or not is_official_suse_repo(repo):
+                    continue
+                result.append(patch_obj(name, f"{name} update ({version})", "SUCCESS", ts, repo))
+    except Exception:
+        pass
+    return result
+
+
+# ----- Arch / Manjaro --------------------------------------------------------
+
+def arch_foreign_packages():
+    if not shutil.which("pacman"):
+        return None
+    rc, out = run(["pacman", "-Qmq"], timeout=15)
+    if rc != 0:
+        return None
+    return {line.strip() for line in out.splitlines() if line.strip()}
+
+
+def installed_updates_arch(limit):
+    result = []
+    path = "/var/log/pacman.log"
+    if not os.path.isfile(path):
+        return result
+    foreign = arch_foreign_packages()
+    try:
+        with open(path, "rt", encoding="utf-8", errors="replace") as f:
+            for line in reversed(f.readlines()):
+                if len(result) >= limit:
+                    break
+                m = re.match(r"^\[(20\d\d-\d\d-\d\d[T ][^\]]+)\]\s+\[ALPM\]\s+upgraded\s+(\S+)\s+\(([^)]*)\)", line.strip())
+                if not m:
+                    continue
+                ts, name, transition = m.groups()
+                if not within_history(ts.replace("T", " ")):
+                    continue
+                if foreign is not None and name in foreign:
+                    continue
+                new_version = transition.split("->")[-1].strip()
+                result.append(patch_obj(name, f"{name} update ({new_version})", "SUCCESS", ts.replace("T", " "), "pacman"))
+    except Exception:
+        pass
+    return result
+
+
+# ----- Pending updates -------------------------------------------------------
+
 def pending_updates(os_id, os_like, limit):
     result = []
-    def add(name, version):
+
+    def add(name, version, source=""):
         if name and len(result) < limit:
-            result.append({"id": name, "description": f"{name} update ({version})" if version else f"{name} update", "installedOn": "-", "status": "PENDING"})
-    if os_id in {"debian", "ubuntu", "linuxmint", "mint", "pop", "elementary", "kali"} or "debian" in os_like:
-        if shutil.which("apt"):
-            rc, out = run(["apt", "list", "--upgradable"], timeout=30)
-            if rc in (0, 100):
-                for line in out.splitlines():
-                    if not line or line.startswith("Listing"):
-                        continue
-                    p = line.split()
-                    if len(p) >= 2:
-                        add(p[0].split("/", 1)[0], p[1])
-    elif shutil.which("dnf") and (os_id in {"rhel", "centos", "rocky", "almalinux", "fedora", "ol", "oracle"} or "rhel" in os_like or "fedora" in os_like):
-        rc, out = run(["dnf", "check-update", "--quiet"], timeout=45)
+            desc = f"{name} update ({version})" if version else f"{name} update"
+            result.append(patch_obj(name, desc, "PENDING", "-", source))
+
+    debian_family = os_id in {"debian", "ubuntu", "linuxmint", "mint", "pop", "elementary", "kali"} or "debian" in os_like or "ubuntu" in os_like
+    rpm_family = os_id in {"rhel", "centos", "rocky", "almalinux", "fedora", "ol", "oracle"} or "rhel" in os_like or "fedora" in os_like
+    suse_family = os_id in {"sles", "suse", "opensuse", "opensuse-leap", "opensuse-tumbleweed"} or "suse" in os_like
+    arch_family = os_id in {"arch", "manjaro"} or "arch" in os_like
+
+    if debian_family and shutil.which("apt"):
+        rc, out = run(["apt", "list", "--upgradable"], timeout=45)
+        if rc in (0, 100):
+            for line in out.splitlines():
+                if not line or line.startswith("Listing"):
+                    continue
+                p = line.split()
+                if len(p) < 2:
+                    continue
+                pkg = p[0].split("/", 1)[0]
+                version = p[1]
+                official, source = apt_source_is_os(pkg)
+                if PATCH_SCOPE == "all" or official:
+                    add(pkg, version, source)
+                    if len(result) >= limit:
+                        break
+
+    elif rpm_family and shutil.which("dnf"):
+        rc, out = run(["dnf", "check-update", "--quiet"], timeout=60)
         if rc in (0, 100):
             for line in out.splitlines():
                 p = line.split()
-                if len(p) >= 2 and "." in p[0]:
-                    add(p[0], p[1])
-    elif shutil.which("yum") and (os_id in {"rhel", "centos", "rocky", "almalinux", "ol", "oracle"} or "rhel" in os_like):
-        rc, out = run(["yum", "check-update", "-q"], timeout=45)
+                if len(p) < 2 or "." not in p[0]:
+                    continue
+                pkg, version = p[0], p[1]
+                repo = p[2] if len(p) >= 3 else ""
+                official = is_official_rpm_repo(repo, os_id)
+                if PATCH_SCOPE == "all" or official:
+                    add(pkg, version, repo)
+                if len(result) >= limit:
+                    break
+
+    elif rpm_family and shutil.which("yum"):
+        rc, out = run(["yum", "check-update", "-q"], timeout=60)
         if rc in (0, 100):
             for line in out.splitlines():
                 p = line.split()
-                if len(p) >= 2 and "." in p[0]:
-                    add(p[0], p[1])
-    elif os_id in {"sles", "suse", "opensuse", "opensuse-leap", "opensuse-tumbleweed"} or "suse" in os_like:
-        if shutil.which("zypper"):
-            rc, out = run(["zypper", "--non-interactive", "list-updates"], timeout=45)
-            if rc == 0:
-                for line in out.splitlines():
-                    p = line.split()
-                    if len(p) >= 3 and p[0] not in {"S", "--"}:
-                        add(p[1], p[-1])
-    elif os_id in {"arch", "manjaro"} or "arch" in os_like:
-        if shutil.which("checkupdates"):
-            rc, out = run(["checkupdates"], timeout=45)
-        elif shutil.which("pacman"):
-            rc, out = run(["pacman", "-Qu"], timeout=45)
-        else:
-            rc, out = 1, ""
-        if rc in (0, 2):
+                if len(p) < 2 or "." not in p[0]:
+                    continue
+                pkg, version = p[0], p[1]
+                repo = p[2] if len(p) >= 3 else ""
+                official = is_official_rpm_repo(repo, os_id)
+                if PATCH_SCOPE == "all" or official:
+                    add(pkg, version, repo)
+                if len(result) >= limit:
+                    break
+
+    elif suse_family and shutil.which("zypper"):
+        rc, out = run(["zypper", "--non-interactive", "list-updates"], timeout=60)
+        if rc == 0:
+            for line in out.splitlines():
+                if "|" not in line or line.strip().startswith("--"):
+                    continue
+                fields = [x.strip() for x in line.split("|")]
+                if len(fields) < 5 or fields[0] == "S":
+                    continue
+                _status, repo, name, _current, available = fields[:5]
+                official = is_official_suse_repo(repo)
+                if PATCH_SCOPE == "all" or official:
+                    add(name, available, repo)
+                if len(result) >= limit:
+                    break
+
+    elif arch_family and shutil.which("pacman"):
+        rc, out = run(["pacman", "-Qu"], timeout=45)
+        if rc in (0, 1):
+            foreign = arch_foreign_packages()
             for line in out.splitlines():
                 p = line.split()
-                if len(p) >= 2:
-                    add(p[0], p[1])
+                if len(p) < 2:
+                    continue
+                pkg, version = p[0], p[1]
+                if PATCH_SCOPE == "os" and foreign is not None and pkg in foreign:
+                    continue
+                add(pkg, version, "pacman")
+                if len(result) >= limit:
+                    break
+
     elif os_id == "alpine" and shutil.which("apk"):
         rc, out = run(["apk", "version", "-l", "<"], timeout=45)
         if rc == 0:
             for line in out.splitlines():
                 p = line.split()
-                if len(p) >= 2:
-                    add(p[0], p[-1])
+                if len(p) < 2:
+                    continue
+                add(p[0], p[-1], "apk")
+                if len(result) >= limit:
+                    break
+
     return result
 
 
 def package_info():
-    osr = parse_os_release()
-    os_id = osr.get("ID", "").lower()
-    os_like = osr.get("ID_LIKE", "").lower()
-    # Package inventory is intentionally cacheable because scanning thousands of
-    # packages every 5-60 seconds is unnecessary load on production hosts.
-    patches = []
-    if os_id in {"debian", "ubuntu", "linuxmint", "mint", "pop", "elementary", "kali"} or "debian" in os_like:
-        patches = deb_packages(MAX_PATCHES)
-    elif os_id == "arch" or os_id == "manjaro" or "arch" in os_like:
-        patches = arch_packages(MAX_PATCHES)
-    elif os_id == "alpine":
-        patches = alpine_packages(MAX_PATCHES)
-    elif shutil.which("rpm"):
-        patches = rpm_packages(MAX_PATCHES)
-    patches.extend(pending_updates(os_id, os_like, MAX_PATCHES))
+    # Compatibility mode: return the legacy installed-package inventory.
+    if PATCH_SCOPE == "all":
+        patches = []
+        if OS_ID in {"debian", "ubuntu", "linuxmint", "mint", "pop", "elementary", "kali"} or "debian" in OS_LIKE:
+            patches = deb_packages(MAX_PATCHES)
+        elif OS_ID == "arch" or OS_ID == "manjaro" or "arch" in OS_LIKE:
+            patches = arch_packages(MAX_PATCHES)
+        elif OS_ID == "alpine":
+            patches = alpine_packages(MAX_PATCHES)
+        elif shutil.which("rpm"):
+            patches = rpm_packages(MAX_PATCHES)
+        patches.extend(pending_updates(OS_ID, OS_LIKE, MAX_PATCHES))
+        unique = {}
+        for p in patches:
+            unique[(p.get("id", ""), p.get("status", ""))] = p
+        result = list(unique.values())
+        result.sort(key=lambda x: (0 if x.get("status") == "PENDING" else 1, x.get("id", "").lower()))
+        return result[:MAX_PATCHES]
+
+    successful = []
+    if OS_ID in {"debian", "ubuntu", "linuxmint", "mint", "pop", "elementary", "kali"} or "debian" in OS_LIKE or "ubuntu" in OS_LIKE:
+        successful = installed_updates_deb(MAX_PATCHES)
+    elif OS_ID in {"rhel", "centos", "rocky", "almalinux", "fedora", "ol", "oracle"} or "rhel" in OS_LIKE or "fedora" in OS_LIKE:
+        successful = installed_updates_rpm(MAX_PATCHES)
+    elif OS_ID in {"sles", "suse", "opensuse", "opensuse-leap", "opensuse-tumbleweed"} or "suse" in OS_LIKE:
+        successful = installed_updates_suse(MAX_PATCHES)
+    elif OS_ID in {"arch", "manjaro"} or "arch" in OS_LIKE:
+        successful = installed_updates_arch(MAX_PATCHES)
+
+    pending = pending_updates(OS_ID, OS_LIKE, MAX_PATCHES)
+    merged = successful + pending
+
     unique = {}
-    for p in patches:
-        unique[(p.get("id", ""), p.get("status", ""))] = p
+    for item in merged:
+        key = (item.get("id", ""), item.get("status", ""), item.get("installedOn", "-"))
+        unique[key] = item
+
     result = list(unique.values())
-    result.sort(key=lambda x: (0 if x.get("status") == "PENDING" else 1, x.get("id", "").lower()))
+    result.sort(key=lambda x: (
+        0 if x.get("status") == "PENDING" else 1,
+        x.get("id", "").lower(),
+        x.get("installedOn", ""),
+    ))
     return result[:MAX_PATCHES]
 
 
@@ -865,19 +1272,27 @@ arch = platform.machine() or "unknown"
 hostname = socket.gethostname()
 
 def cached_package_info():
+    # Cache only the already-classified patch result. Include the scope in the
+    # cache envelope so switching from legacy "all" to production "os" mode
+    # never reuses an old all-package inventory.
     try:
         p = Path(PACKAGE_CACHE_FILE)
         if p.is_file() and now - p.stat().st_mtime < PACKAGE_SCAN_INTERVAL:
             data = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                return data[:MAX_PATCHES]
+            if isinstance(data, dict) and data.get("scope") == PATCH_SCOPE and isinstance(data.get("patches"), list):
+                return data["patches"][:MAX_PATCHES]
     except Exception:
         pass
 
     patches = package_info()
     try:
         tmp = Path(PACKAGE_CACHE_FILE + ".tmp")
-        tmp.write_text(json.dumps(patches, ensure_ascii=False), encoding="utf-8")
+        envelope = {
+            "scope": PATCH_SCOPE,
+            "generatedAt": datetime.now(timezone.utc).isoformat(),
+            "patches": patches,
+        }
+        tmp.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, PACKAGE_CACHE_FILE)
     except Exception:
         pass
@@ -890,7 +1305,7 @@ disks = disk_info()
 
 payload = {
     "schemaVersion": "1.1",
-    "agent": {"name": "Orion SysPulse Agent", "version": "2.0.0"},
+    "agent": {"name": "Orion SysPulse Agent", "version": "2.1.0"},
     "serverId": hostname,
     "serverName": hostname,
     "hostname": hostname,
@@ -985,7 +1400,7 @@ print(json.dumps({
     "serverName": h,
     "hostname": h,
     "timestamp": datetime.now(timezone.utc).isoformat(),
-    "agent": {"name": "Orion SysPulse Agent", "version": "2.0.0"},
+    "agent": {"name": "Orion SysPulse Agent", "version": "2.1.0"},
 }))
 PY
 ) || return 1
